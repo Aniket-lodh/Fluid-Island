@@ -1,0 +1,22 @@
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+dist/
+out/
+coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.log
