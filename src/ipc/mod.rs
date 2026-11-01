@@ -1,3 +1,13 @@
 //! Inter-process communication (D-Bus).
-//!
-//! Implemented in Milestone 3. Left as an empty module for the scaffold.
+
+pub mod service;
+
+#[allow(unused_imports)]
+pub use service::{start_ipc_service, FluidIslandInterface, SharedState};
+
+/// Events sent from the IPC thread to the GTK main thread.
+#[derive(Clone, Copy, Debug)]
+pub enum IpcEvent {
+    StateChanged(crate::state::IslandState),
+    AttachmentChanged(bool),
+}

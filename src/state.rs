@@ -24,6 +24,14 @@ impl IslandState {
     pub fn set(&mut self, state: Self) {
         *self = state;
     }
+
+    /// Return the protocol representation of this state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Collapsed => "collapsed",
+            Self::Expanded => "expanded",
+        }
+    }
 }
 
 impl fmt::Display for IslandState {

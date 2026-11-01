@@ -6,8 +6,7 @@ use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::AdwApplicationWindowExt;
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 const ISLAND_CSS: &str = r#"
 .fluid-island {
@@ -27,14 +26,18 @@ const ISLAND_CSS: &str = r#"
 "#;
 
 /// A compact, island-inspired window exposing the island state.
+#[derive(Clone)]
 pub struct FallbackWindow {
     window: adw::ApplicationWindow,
+    state: Arc<Mutex<IslandState>>,
+    toggle: gtk4::Button,
+    revealer: gtk4::Revealer,
 }
 
 impl FallbackWindow {
     /// Create and wire the fallback window. The window is not presented by this
     /// constructor; call [`FallbackWindow::present`].
-    pub fn new(application: &adw::Application, state: Rc<Cell<IslandState>>) -> Self {
+    pub fn new(application: &adw::Application, state: Arc<Mutex<IslandState>>) -> Self {
         let window = adw::ApplicationWindow::builder()
             .application(application)
             .title("Fluid Island")
@@ -59,7 +62,8 @@ impl FallbackWindow {
         let title = gtk4::Label::new(Some("Fluid Island"));
         title.add_css_class("fluid-island-title");
 
-        let toggle = gtk4::Button::with_label(button_label(state.get()));
+        let initial_state = state.lock().map(|guard| *guard).unwrap_or_default();
+        let toggle = gtk4::Button::with_label(button_label(initial_state));
         toggle.set_tooltip_text(Some("Toggle the island state"));
 
         let revealer = gtk4::Revealer::new();
@@ -92,10 +96,14 @@ impl FallbackWindow {
         let toggle_for_click = toggle.clone();
         let revealer_for_click = revealer.clone();
         toggle.connect_clicked(move |_| {
-            let mut current = state_for_click.get();
-            current.toggle();
-            state_for_click.set(current);
-            apply_state(current, &toggle_for_click, &revealer_for_click);
+            let new_state = {
+                let mut guard = state_for_click
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.toggle();
+                *guard
+            };
+            apply_state(new_state, &toggle_for_click, &revealer_for_click);
         });
 
         let state_for_key = state.clone();
@@ -103,8 +111,10 @@ impl FallbackWindow {
         let revealer_for_key = revealer.clone();
         let controller = gtk4::EventControllerKey::new();
         controller.connect_key_pressed(move |_controller, key, _keycode, _modifiers| {
-            if key == gdk::Key::Escape && state_for_key.get() == IslandState::Expanded {
-                state_for_key.set(IslandState::Collapsed);
+            if key == gdk::Key::Escape
+                && *state_for_key.lock().unwrap_or_else(|p| p.into_inner()) == IslandState::Expanded
+            {
+                *state_for_key.lock().unwrap_or_else(|p| p.into_inner()) = IslandState::Collapsed;
                 apply_state(IslandState::Collapsed, &toggle_for_key, &revealer_for_key);
                 Propagation::Stop
             } else {
@@ -113,14 +123,32 @@ impl FallbackWindow {
         });
         window.add_controller(controller);
 
-        apply_state(state.get(), &toggle, &revealer);
+        apply_state(initial_state, &toggle, &revealer);
 
-        Self { window }
+        Self {
+            window,
+            state,
+            toggle,
+            revealer,
+        }
     }
 
     /// Present the window to the user.
     pub fn present(&self) {
         self.window.present();
+    }
+
+    /// Hide the window.
+    pub fn hide(&self) {
+        self.window.set_visible(false);
+    }
+
+    /// Update the shared state and UI to the supplied value.
+    pub fn set_state(&self, state: IslandState) {
+        if let Ok(mut guard) = self.state.lock() {
+            *guard = state;
+        }
+        apply_state(state, &self.toggle, &self.revealer);
     }
 }
 
