@@ -2,6 +2,8 @@
 
 pub mod service;
 
+// Re-exported for the library API and integration tests. The binary target
+// does not reference `FluidIslandInterface` directly.
 #[allow(unused_imports)]
 pub use service::{start_ipc_service, FluidIslandInterface, SharedState};
 

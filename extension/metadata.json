@@ -1,0 +1,8 @@
+{
+    "uuid": "fluid-island@fluid-island.local",
+    "name": "Fluid Island",
+    "description": "Thin top-bar renderer for Fluid Island core.",
+    "shell-version": ["48"],
+    "url": "https://github.com/fluid-island/fluid-island",
+    "version": 1
+}

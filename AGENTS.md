@@ -122,10 +122,11 @@ run, state why and what was not verified.
 1. Repository and agent infrastructure (this phase).
 2. Rust core scaffold with state machine and fallback window.
 3. D-Bus service and contract tests.
-4. GNOME extension (thin) for GNOME 48.
-5. Activity integrations (media, notifications, timers, etc.).
+4. Standalone application polish.
+5. Linux desktop integrations.
 6. Performance, accessibility, and reliability hardening.
-7. Packaging and installation documentation.
+7. Standalone application packaging and installation.
+8. Optional GNOME Shell extension for GNOME 48.
 
 ## 9. Safety requirements (approval needed)
 

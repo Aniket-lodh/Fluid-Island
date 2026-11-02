@@ -1,5 +1,6 @@
 use crate::ipc::{start_ipc_service, IpcEvent, SharedState};
 use crate::state::IslandState;
+use crate::stopwatch::Stopwatch;
 use crate::ui::FallbackWindow;
 use gtk4::glib;
 use libadwaita as adw;
@@ -7,39 +8,53 @@ use libadwaita::gio::prelude::{ApplicationExt, ApplicationExtManual};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 thread_local! {
     static FALLBACK_WINDOW: RefCell<Option<FallbackWindow>> =
         const { RefCell::new(None) };
 }
 
-/// The Fluid Island GTK application.
+fn fallback_enabled() -> bool {
+    std::env::var("FLUID_ISLAND_FALLBACK").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        || std::env::args().any(|a| a == "--fallback")
+}
+
+/// Headless by default; the GTK window only appears with `FLUID_ISLAND_FALLBACK=1` or `--fallback`.
+// Fields are retained for ownership; state is mutated through shared Arcs.
 #[allow(dead_code)]
 pub struct FluidApplication {
     application: adw::Application,
     state: Arc<Mutex<IslandState>>,
     attached: Arc<AtomicBool>,
     _ipc_service: crate::ipc::service::IpcServiceHandle,
+    _hold_guard: Option<libadwaita::gio::ApplicationHoldGuard>,
 }
 
 #[allow(clippy::new_without_default)]
 impl FluidApplication {
-    /// Create the application object, wire the IPC service, and prepare the
-    /// fallback window. The window is shown on activation unless the extension
-    /// attaches within the startup grace period.
+    /// The fallback window is only created when fallback mode is enabled.
     pub fn new() -> Self {
-        // Use None for the GTK application id so GApplication does not try to
-        // own the session-bus name; we manage org.fluidisland.Core ourselves
-        // via zbus. A shared id would conflict with GTK's own registration.
-        let application = adw::Application::new(None, Default::default());
+        let fallback = fallback_enabled();
+        let flags = if fallback {
+            libadwaita::gio::ApplicationFlags::empty()
+        } else {
+            libadwaita::gio::ApplicationFlags::IS_SERVICE
+        };
+        let application = adw::Application::new(None, flags);
+        let hold_guard = if fallback {
+            None
+        } else {
+            Some(application.hold())
+        };
 
         let state = Arc::new(Mutex::new(IslandState::Collapsed));
         let attached = Arc::new(AtomicBool::new(false));
+        let stopwatch = Arc::new(Mutex::new(Stopwatch::new()));
 
         let shared = SharedState {
             state: state.clone(),
             attached: attached.clone(),
+            stopwatch: stopwatch.clone(),
         };
 
         let on_event = Arc::new(move |event: IpcEvent| {
@@ -61,29 +76,27 @@ impl FluidApplication {
         let state_for_activate = state.clone();
         let attached_for_activate = attached.clone();
         let attached_for_struct = attached.clone();
+        let stopwatch_for_activate = stopwatch.clone();
         application.connect_activate(move |gtk_application| {
-            let fallback = FallbackWindow::new(gtk_application, state_for_activate.clone());
-
-            FALLBACK_WINDOW.with(|slot| {
-                *slot.borrow_mut() = Some(fallback.clone());
-            });
-
-            // If the extension is already attached, keep the fallback hidden
-            // and skip the grace timeout entirely.
-            if attached_for_activate.load(Ordering::SeqCst) {
-                fallback.hide();
+            if !fallback_enabled() {
+                // Headless shell-owned mode: no GTK window, not an Alt+Tab app.
                 return;
             }
+            let fallback = FallbackWindow::new(
+                gtk_application,
+                state_for_activate.clone(),
+                stopwatch_for_activate.clone(),
+            );
 
-            // Startup grace period: keep the fallback hidden briefly so an
-            // attaching extension can take over without a visible flash. If the
-            // extension does not attach within the grace period, show the
-            // fallback window so the application remains usable standalone.
-            let fallback_for_timeout = FALLBACK_WINDOW.with(|slot| slot.borrow().clone());
-            let attached_for_timeout = attached.clone();
-            glib::timeout_add_local_once(Duration::from_millis(250), move || {
-                if !attached_for_timeout.load(Ordering::SeqCst) {
-                    if let Some(window) = fallback_for_timeout {
+            // The window owns its widgets; store it, then operate through the slot.
+            FALLBACK_WINDOW.with(|slot| {
+                *slot.borrow_mut() = Some(fallback);
+            });
+            FALLBACK_WINDOW.with(|slot| {
+                if let Some(window) = slot.borrow().as_ref() {
+                    if attached_for_activate.load(Ordering::SeqCst) {
+                        window.hide();
+                    } else {
                         window.present();
                     }
                 }
@@ -95,11 +108,13 @@ impl FluidApplication {
             state,
             attached: attached_for_struct,
             _ipc_service: ipc_service,
+            _hold_guard: hold_guard,
         }
     }
 
-    /// Run the application's main loop.
     pub fn run(&self) {
-        self.application.run();
+        // Filter --fallback so GApplication doesn't see an unknown option.
+        let args: Vec<String> = std::env::args().filter(|a| a != "--fallback").collect();
+        self.application.run_with_args(&args);
     }
 }

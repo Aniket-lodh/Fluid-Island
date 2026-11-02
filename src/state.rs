@@ -11,7 +11,6 @@ pub enum IslandState {
 }
 
 impl IslandState {
-    /// Flip between `Collapsed` and `Expanded`.
     pub fn toggle(&mut self) {
         *self = match *self {
             Self::Collapsed => Self::Expanded,
@@ -20,12 +19,14 @@ impl IslandState {
     }
 
     /// Set the state explicitly.
+    ///
+    /// No production caller yet; retained as explicit-state API alongside
+    /// `toggle()` and covered by unit tests.
     #[allow(dead_code)]
     pub fn set(&mut self, state: Self) {
         *self = state;
     }
 
-    /// Return the protocol representation of this state.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Collapsed => "collapsed",

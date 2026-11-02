@@ -6,7 +6,10 @@
 
 use fluid_island::ipc::{FluidIslandInterface, IpcEvent, SharedState};
 use fluid_island::state::IslandState;
+use fluid_island::stopwatch::Stopwatch;
+use futures_util::stream::TryStreamExt;
 use std::io::{BufRead, BufReader};
+use std::num::NonZeroUsize;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{
@@ -17,6 +20,8 @@ use std::thread;
 use std::time::Duration;
 use zbus::connection::Builder;
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
+use zbus::message::Type;
+use zbus::{MatchRule, MessageStream};
 
 const BUS_NAME: &str = "org.fluidisland.Core";
 const OBJECT_PATH: &str = "/org/fluidisland/Core";
@@ -167,6 +172,7 @@ fn initial_state_and_get_state() {
     let shared = SharedState {
         state: Arc::new(Mutex::new(IslandState::Collapsed)),
         attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let (_handle, ready) = run_service(address.clone(), shared, events.clone());
@@ -192,6 +198,7 @@ fn toggle_changes_state() {
     let shared = SharedState {
         state: Arc::new(Mutex::new(IslandState::Collapsed)),
         attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let (_handle, ready) = run_service(address.clone(), shared, events.clone());
@@ -234,6 +241,132 @@ fn toggle_changes_state() {
 }
 
 #[test]
+fn stopwatch_lap_roundtrip() {
+    let (address, daemon) = start_private_bus().expect("failed to start dbus-daemon");
+    let _guard = BusGuard(Some(daemon));
+
+    let shared = SharedState {
+        state: Arc::new(Mutex::new(IslandState::Collapsed)),
+        attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
+    };
+    let _events = Arc::new(Mutex::new(Vec::new()));
+    let (_handle, ready) = run_service(address.clone(), shared, _events);
+
+    ready
+        .recv_timeout(Duration::from_secs(5))
+        .expect("service failed to start")
+        .expect("service failed to register on bus");
+
+    zbus::block_on(async {
+        let client = connect_client(&address).await;
+
+        async fn get_laps(client: &zbus::Connection) -> Vec<String> {
+            let reply = client
+                .call_method(
+                    Some(BUS_NAME),
+                    OBJECT_PATH,
+                    Some(IFACE_NAME),
+                    "GetLaps",
+                    &(),
+                )
+                .await
+                .expect("GetLaps call failed");
+            let (laps,): (Vec<String>,) = reply
+                .body()
+                .deserialize()
+                .expect("failed to deserialize GetLaps reply");
+            laps
+        }
+
+        async fn call_no_arg(client: &zbus::Connection, member: &str) {
+            client
+                .call_method(Some(BUS_NAME), OBJECT_PATH, Some(IFACE_NAME), member, &())
+                .await
+                .unwrap_or_else(|_| panic!("{member} call failed"));
+        }
+
+        assert!(get_laps(&client).await.is_empty());
+
+        call_no_arg(&client, "StopwatchLap").await;
+        assert!(get_laps(&client).await.is_empty());
+
+        call_no_arg(&client, "StopwatchStart").await;
+        thread::sleep(Duration::from_millis(30));
+        call_no_arg(&client, "StopwatchLap").await;
+        thread::sleep(Duration::from_millis(30));
+        call_no_arg(&client, "StopwatchLap").await;
+
+        let laps = get_laps(&client).await;
+        assert_eq!(laps.len(), 2, "two laps must be recorded");
+        assert!(laps[1] >= laps[0], "laps must be non-decreasing");
+
+        call_no_arg(&client, "StopwatchReset").await;
+        assert!(get_laps(&client).await.is_empty());
+    });
+}
+
+#[test]
+fn state_changed_signal_delivery() {
+    let (address, daemon) = start_private_bus().expect("failed to start dbus-daemon");
+    let _guard = BusGuard(Some(daemon));
+
+    let shared = SharedState {
+        state: Arc::new(Mutex::new(IslandState::Collapsed)),
+        attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
+    };
+    let _events = Arc::new(Mutex::new(Vec::new()));
+    let (_handle, ready) = run_service(address.clone(), shared, _events);
+
+    ready
+        .recv_timeout(Duration::from_secs(5))
+        .expect("service failed to start")
+        .expect("service failed to register on bus");
+
+    zbus::block_on(async {
+        let client = connect_client(&address).await;
+
+        // Subscribe to the StateChanged signal before toggling, so we don't miss it.
+        let rule = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .interface(IFACE_NAME)
+            .member("StateChanged")
+            .path(OBJECT_PATH)
+            .build()
+            .expect("failed to build match rule");
+        let mut stream =
+            MessageStream::for_match_rule(rule, &client, Some(NonZeroUsize::new(1).unwrap()))
+                .await
+                .expect("failed to create message stream");
+
+        // Initial state is collapsed.
+        assert_eq!(get_state(&client).await, "collapsed");
+
+        // Toggle to expanded; the signal should be delivered on the bus.
+        let new_state = toggle(&client).await;
+        assert_eq!(new_state, "expanded", "Toggle must flip to expanded");
+
+        // Wait for the StateChanged signal to arrive over D-Bus.
+        let msg = stream
+            .try_next()
+            .await
+            .expect("failed to receive next message")
+            .expect("message stream ended unexpectedly");
+
+        // Deserialize the signal body: (state,)
+        let (signal_state,): (String,) = msg
+            .body()
+            .deserialize()
+            .expect("failed to deserialize StateChanged signal body");
+        assert_eq!(
+            signal_state, "expanded",
+            "StateChanged signal must carry the expanded state"
+        );
+    });
+}
+
+#[test]
 fn attach_detach_are_idempotent() {
     let (address, daemon) = start_private_bus().expect("failed to start dbus-daemon");
     let _guard = BusGuard(Some(daemon));
@@ -241,6 +374,7 @@ fn attach_detach_are_idempotent() {
     let shared = SharedState {
         state: Arc::new(Mutex::new(IslandState::Collapsed)),
         attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let (_handle, ready) = run_service(address.clone(), shared, events.clone());
@@ -317,6 +451,7 @@ fn service_ownership_conflict_is_reported() {
     let shared = SharedState {
         state: Arc::new(Mutex::new(IslandState::Collapsed)),
         attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let (_handle, ready) = run_service(address.clone(), shared, events.clone());
@@ -366,6 +501,7 @@ fn state_survives_client_disconnect_and_reconnect() {
     let shared = SharedState {
         state: Arc::new(Mutex::new(IslandState::Collapsed)),
         attached: Arc::new(AtomicBool::new(false)),
+        stopwatch: Arc::new(Mutex::new(Stopwatch::new())),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let (_handle, ready) = run_service(address.clone(), shared, events.clone());

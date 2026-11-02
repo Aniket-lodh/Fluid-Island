@@ -2,6 +2,8 @@
 
 use crate::ipc::IpcEvent;
 use crate::state::IslandState;
+use crate::stopwatch::{format_duration_cs, Stopwatch};
+use crate::system_info;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -14,6 +16,7 @@ use tracing::{error, info};
 pub struct SharedState {
     pub state: Arc<Mutex<IslandState>>,
     pub attached: Arc<AtomicBool>,
+    pub stopwatch: Arc<Mutex<Stopwatch>>,
 }
 
 /// Owns the D-Bus service thread. Keeping the handle alive keeps the IPC
@@ -23,7 +26,6 @@ pub struct IpcServiceHandle {
     pub thread: thread::JoinHandle<()>,
 }
 
-/// Start the D-Bus service on a dedicated thread.
 pub fn start_ipc_service(
     shared: SharedState,
     on_event: Arc<dyn Fn(IpcEvent) + Send + Sync>,
@@ -129,6 +131,85 @@ impl FluidIslandInterface {
     async fn detach(&mut self) {
         self.shared.attached.store(false, Ordering::SeqCst);
         (self.on_event)(IpcEvent::AttachmentChanged(false));
+    }
+
+    fn get_system_info(&self) -> (String, String, String, String, String) {
+        let (time, tz) = system_info::current_time();
+        let uptime = system_info::read_uptime().unwrap_or_default();
+        let memory = system_info::read_memory_usage().unwrap_or_default();
+        let load = system_info::read_loadavg().unwrap_or_default();
+        (time, tz.unwrap_or_default(), uptime, memory, load)
+    }
+
+    fn get_stopwatch(&self) -> (String, String) {
+        let sw = self
+            .shared
+            .stopwatch
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let elapsed = sw.elapsed();
+        let status = if sw.is_running() {
+            "running"
+        } else if elapsed.is_zero() {
+            "stopped"
+        } else {
+            "paused"
+        };
+        (format_duration_cs(elapsed), status.to_string())
+    }
+
+    fn get_laps(&self) -> Vec<String> {
+        self.shared
+            .stopwatch
+            .lock()
+            .map(|g| g.laps().iter().map(|d| format_duration_cs(*d)).collect())
+            .unwrap_or_default()
+    }
+
+    fn stopwatch_lap(&self) {
+        let mut sw = self
+            .shared
+            .stopwatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        sw.lap();
+    }
+
+    fn stopwatch_start(&self) {
+        let mut sw = self
+            .shared
+            .stopwatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        sw.start();
+    }
+
+    fn stopwatch_pause(&self) {
+        let mut sw = self
+            .shared
+            .stopwatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        sw.pause();
+    }
+
+    fn stopwatch_resume(&self) {
+        let mut sw = self
+            .shared
+            .stopwatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        sw.resume();
+    }
+
+    fn stopwatch_reset(&self) {
+        let mut sw = self
+            .shared
+            .stopwatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        sw.reset();
     }
 
     #[zbus(signal)]
